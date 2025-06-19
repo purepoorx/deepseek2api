@@ -1,0 +1,18 @@
+{
+  "accounts": [
+    {
+      "email": "user1@example.com",
+      "password": "password1",
+      "token": "your_prefetched_token_1"
+    },
+    {
+      "mobile": "18000000002",
+      "password": "password2",
+      "token": "your_prefetched_token_2"
+    }
+  ],
+  "api_keys": [
+    "sk-your-custom-api-key-1",
+    "sk-your-custom-api-key-2"
+  ]
+}
