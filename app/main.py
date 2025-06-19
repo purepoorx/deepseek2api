@@ -1,11 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException, Depends
-from starlette.exceptions import ClientDisconnect
 from fastapi.responses import StreamingResponse, JSONResponse
-import asyncio
 import httpx
 import time
-import json
-import os
 
 from .config import config
 from .accounts import account_manager
@@ -70,14 +66,10 @@ async def chat_completions(request: Request):
         client = DeepSeekClient(token=account.token, session=http_client)
         
         if stream:
-            async def generator():
-                try:
-                    async for chunk in convert_to_openai_stream(client.chat_stream(prompt, thinking_enabled), model):
-                        yield chunk
-                except ClientDisconnect:
-                    print("Client disconnected.")
-
-            return StreamingResponse(generator(), media_type="text/event-stream")
+            return StreamingResponse(
+                convert_to_openai_stream(client.chat_stream(prompt, thinking_enabled), model),
+                media_type="text/event-stream"
+            )
         else:
             full_content = ""
             async for chunk in client.chat_stream(prompt, thinking_enabled):
