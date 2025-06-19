@@ -44,43 +44,6 @@ async def list_models():
     }
 
 @app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key)])
-async def stream_generator(request_data: dict):
-    """A unified generator to handle the entire streaming process with proper resource management."""
-    model = request_data.get("model", "deepseek-chat")
-    prompt = request_data.get("messages", [{}])[-1].get("content")
-    
-    if "thinking_enabled" in request_data:
-        thinking_enabled = request_data["thinking_enabled"]
-    else:
-        thinking_enabled = "thinking" in model
-
-    async with account_manager.managed_account() as account:
-        client = DeepSeekClient(token=account.token, session=http_client)
-        async with client.managed_chat_session() as session_id:
-            if not session_id:
-                # In streaming mode, we yield an error. Here we adapt for non-stream.
-                # This part is tricky for non-stream, let's assume session_id is always created for now.
-                # A more robust solution would handle this failure case.
-                yield {"type": "error", "content": "Failed to create chat session."}
-                return
-
-            stream = client.chat_stream(session_id, prompt, thinking_enabled)
-            async for chunk in stream: # We'll convert to openai format outside
-                yield chunk
-
-async def get_full_response(request_data: dict):
-    """Handles the non-streaming case, aggregating content."""
-    full_content = ""
-    async for chunk in stream_generator(request_data):
-        if chunk.get("type") == "content":
-            full_content += chunk.get("content", "")
-        elif chunk.get("type") == "error":
-            # If the generator yields an error, we can propagate it
-            raise HTTPException(status_code=500, detail=chunk.get("content"))
-    return full_content
-
-
-@app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key)])
 async def chat_completions(request: Request):
     try:
         request_data = await request.json()
@@ -88,23 +51,42 @@ async def chat_completions(request: Request):
         print("Client disconnected before request body was received.")
         return JSONResponse(status_code=400, content={"error": "Client disconnected."})
 
-    stream = request_data.get("stream", False)
     model = request_data.get("model", "deepseek-chat")
+    prompt = request_data.get("messages", [{}])[-1].get("content")
+    thinking_enabled = "thinking" in model if "thinking_enabled" not in request_data else request_data["thinking_enabled"]
 
-    if stream:
-        # The generator now yields raw chunks, convert them for the stream
-        openai_stream = convert_to_openai_stream(stream_generator(request_data), model)
-        return StreamingResponse(openai_stream, media_type="text/event-stream")
+    if request_data.get("stream", False):
+        async def stream_logic():
+            async with account_manager.managed_account() as account:
+                client = DeepSeekClient(token=account.token, session=http_client)
+                async with client.managed_chat_session() as session_id:
+                    if not session_id:
+                        return
+                    raw_stream = client.chat_stream(session_id, prompt, thinking_enabled)
+                    openai_stream = convert_to_openai_stream(raw_stream, model)
+                    async for chunk in openai_stream:
+                        yield chunk
+        return StreamingResponse(stream_logic(), media_type="text/event-stream")
     else:
-        # Handle non-streaming case
-        full_content = await get_full_response(request_data)
-        return {
+        full_content = ""
+        async with account_manager.managed_account() as account:
+            client = DeepSeekClient(token=account.token, session=http_client)
+            async with client.managed_chat_session() as session_id:
+                if not session_id:
+                    raise HTTPException(status_code=500, detail="Failed to create chat session.")
+                
+                async for chunk in client.chat_stream(session_id, prompt, thinking_enabled):
+                    if chunk.get("type") == "content":
+                        full_content += chunk.get("content", "")
+        
+        response_data = {
             "id": f"chatcmpl-{int(time.time())}",
             "object": "chat.completion",
             "created": int(time.time()),
             "model": model,
             "choices": [{"message": {"role": "assistant", "content": full_content}, "index": 0, "finish_reason": "stop"}]
         }
+        return JSONResponse(content=response_data)
 
 if __name__ == "__main__":
     import uvicorn
