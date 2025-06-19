@@ -1,5 +1,6 @@
 import asyncio
 import httpx
+from contextlib import asynccontextmanager
 from .config import config
 
 class AccountManager:
@@ -65,5 +66,13 @@ class AccountManager:
     def release_account(self, account):
         self.account_queue.put_nowait(account)
         print("Account released.")
+
+    @asynccontextmanager
+    async def managed_account(self):
+        account = await self.get_account()
+        try:
+            yield account
+        finally:
+            self.release_account(account)
 
 account_manager = AccountManager()

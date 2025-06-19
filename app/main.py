@@ -44,47 +44,70 @@ async def list_models():
     }
 
 @app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key)])
-async def chat_completions(request: Request):
-    try:
-        request_data = await request.json()
-    except Exception:
-        # Handle cases where the client disconnects before sending the body
-        print("Client disconnected before request body was received.")
-        return JSONResponse(status_code=400, content={"error": "Client disconnected."})
-
-    prompt = request_data.get("messages", [{}])[-1].get("content")
+async def stream_generator(request_data: dict):
+    """A unified generator to handle the entire streaming process with proper resource management."""
     model = request_data.get("model", "deepseek-chat")
-    stream = request_data.get("stream", False)
+    prompt = request_data.get("messages", [{}])[-1].get("content")
     
     if "thinking_enabled" in request_data:
         thinking_enabled = request_data["thinking_enabled"]
     else:
         thinking_enabled = "thinking" in model
 
-    account = await account_manager.get_account()
-    try:
+    async with account_manager.managed_account() as account:
         client = DeepSeekClient(token=account.token, session=http_client)
-        
-        if stream:
-            return StreamingResponse(
-                convert_to_openai_stream(client.chat_stream(prompt, thinking_enabled), model),
-                media_type="text/event-stream"
-            )
-        else:
-            full_content = ""
-            async for chunk in client.chat_stream(prompt, thinking_enabled):
-                if chunk["type"] == "content":
-                    full_content += chunk["content"]
-            
-            return {
-                "id": f"chatcmpl-{int(time.time())}",
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [{"message": {"role": "assistant", "content": full_content}, "index": 0, "finish_reason": "stop"}]
-            }
-    finally:
-        account_manager.release_account(account)
+        async with client.managed_chat_session() as session_id:
+            if not session_id:
+                # Yield an error chunk if session creation failed
+                yield {"type": "error", "content": "Failed to create chat session."}
+                return
+
+            stream = client.chat_stream(session_id, prompt, thinking_enabled)
+            async for chunk in convert_to_openai_stream(stream, model):
+                yield chunk
+
+
+@app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key)])
+async def chat_completions(request: Request):
+    try:
+        request_data = await request.json()
+    except Exception:
+        print("Client disconnected before request body was received.")
+        return JSONResponse(status_code=400, content={"error": "Client disconnected."})
+
+    stream = request_data.get("stream", False)
+    
+    if stream:
+        return StreamingResponse(
+            stream_generator(request_data),
+            media_type="text/event-stream"
+        )
+    else:
+        # Handle non-streaming case
+        full_content = ""
+        model = request_data.get("model", "deepseek-chat")
+        async for chunk in stream_generator(request_data):
+            # The generator yields OpenAI-formatted chunks, so we need to parse them
+            try:
+                # Skip the initial 'data: ' prefix if it exists
+                if chunk.startswith("data: "):
+                    chunk = chunk[6:]
+                if chunk.strip() == "[DONE]":
+                    continue
+                data = json.loads(chunk)
+                delta = data.get("choices", [{}])[0].get("delta", {})
+                if "content" in delta:
+                    full_content += delta["content"]
+            except (json.JSONDecodeError, IndexError):
+                continue # Ignore non-json chunks or malformed data
+
+        return {
+            "id": f"chatcmpl-{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{"message": {"role": "assistant", "content": full_content}, "index": 0, "finish_reason": "stop"}]
+        }
 
 if __name__ == "__main__":
     import uvicorn

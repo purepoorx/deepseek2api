@@ -5,6 +5,7 @@ import json
 import base64
 from wasmtime import Store, Module, Linker
 import httpx
+from contextlib import asynccontextmanager
 
 # --- API Configuration ---
 DEEPSEEK_API_BASE = "https://chat.deepseek.com/api/v0"
@@ -161,77 +162,82 @@ class DeepSeekClient:
         except Exception as e:
             print(f"Error deleting session: {e}")
 
-    async def chat_stream(self, prompt: str, thinking_enabled: bool = True):
+    @asynccontextmanager
+    async def managed_chat_session(self):
         session_id = await self._create_session()
         if not session_id:
+            # If session creation fails, yield None and let the caller handle it
+            yield None
             return
-
         try:
-            pow_response = await self._get_and_solve_pow()
-            if not pow_response:
-                return
-                
-            chat_headers = {**self.headers, "x-ds-pow-response": pow_response}
-            payload = {
-                "chat_session_id": session_id,
-                "parent_message_id": None,
-                "prompt": prompt,
-                "ref_file_ids": [],
-                "thinking_enabled": thinking_enabled,
-                "search_enabled": False,
-            }
-
-            print(f"\n--- Sending prompt (Thinking: {thinking_enabled}) ---")
-            
-            try:
-                async with self.session.stream(
-                    "POST",
-                    f"{DEEPSEEK_API_BASE}/chat/completion",
-                    headers=chat_headers,
-                    json=payload,
-                    timeout=None
-                ) as resp:
-                    resp.raise_for_status()
-                    
-                    is_thinking = False
-                    buffer = ""
-                    async for content_chunk in resp.aiter_bytes():
-                        buffer += content_chunk.decode('utf-8', errors='ignore')
-                        while '\n\n' in buffer:
-                            line, buffer = buffer.split('\n\n', 1)
-                            if not line.startswith("data:"):
-                                continue
-                                
-                            data_str = line[6:].strip()
-                            if data_str == "[DONE]":
-                                return
-                                
-                            try:
-                                chunk = json.loads(data_str)
-                                path = chunk.get("p")
-                                value = chunk.get("v")
-
-                                if path == "response/thinking_content":
-                                    if not is_thinking:
-                                        is_thinking = True
-                                        yield {"type": "thinking_start"}
-                                    yield {"type": "thinking", "content": value}
-                                elif path == "response/content":
-                                    if is_thinking:
-                                        is_thinking = False
-                                        yield {"type": "answer_start"}
-                                    yield {"type": "content", "content": value}
-                                elif value is not None and isinstance(value, str) and "p" not in chunk:
-                                    if is_thinking:
-                                        yield {"type": "thinking", "content": value}
-                                    else:
-                                        yield {"type": "content", "content": value}
-
-                            except (json.JSONDecodeError, AttributeError):
-                                continue
-            except Exception as e:
-                print(f"\nError during chat completion: {e}")
-                yield {"type": "error", "content": str(e)}
-
+            yield session_id
         finally:
+            # This ensures deletion happens even if the stream breaks
             await self._delete_session(session_id)
+
+    async def chat_stream(self, session_id: str, prompt: str, thinking_enabled: bool = True):
+        pow_response = await self._get_and_solve_pow()
+        if not pow_response:
+            return
+            
+        chat_headers = {**self.headers, "x-ds-pow-response": pow_response}
+        payload = {
+            "chat_session_id": session_id,
+            "parent_message_id": None,
+            "prompt": prompt,
+            "ref_file_ids": [],
+            "thinking_enabled": thinking_enabled,
+            "search_enabled": False,
+        }
+
+        print(f"\n--- Sending prompt (Thinking: {thinking_enabled}) ---")
+        
+        try:
+            async with self.session.stream(
+                "POST",
+                f"{DEEPSEEK_API_BASE}/chat/completion",
+                headers=chat_headers,
+                json=payload,
+                timeout=None
+            ) as resp:
+                resp.raise_for_status()
+                
+                is_thinking = False
+                buffer = ""
+                async for content_chunk in resp.aiter_bytes():
+                    buffer += content_chunk.decode('utf-8', errors='ignore')
+                    while '\n\n' in buffer:
+                        line, buffer = buffer.split('\n\n', 1)
+                        if not line.startswith("data:"):
+                            continue
+                            
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            return
+                            
+                        try:
+                            chunk = json.loads(data_str)
+                            path = chunk.get("p")
+                            value = chunk.get("v")
+
+                            if path == "response/thinking_content":
+                                if not is_thinking:
+                                    is_thinking = True
+                                    yield {"type": "thinking_start"}
+                                yield {"type": "thinking", "content": value}
+                            elif path == "response/content":
+                                if is_thinking:
+                                    is_thinking = False
+                                    yield {"type": "answer_start"}
+                                yield {"type": "content", "content": value}
+                            elif value is not None and isinstance(value, str) and "p" not in chunk:
+                                if is_thinking:
+                                    yield {"type": "thinking", "content": value}
+                                else:
+                                    yield {"type": "content", "content": value}
+
+                        except (json.JSONDecodeError, AttributeError):
+                            continue
+        except Exception as e:
+            print(f"\nError during chat completion: {e}")
+            yield {"type": "error", "content": str(e)}
