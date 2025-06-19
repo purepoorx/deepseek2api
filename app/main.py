@@ -52,7 +52,16 @@ async def chat_completions(request: Request):
         return JSONResponse(status_code=400, content={"error": "Client disconnected."})
 
     model = request_data.get("model", "deepseek-chat")
-    prompt = request_data.get("messages", [{}])[-1].get("content")
+    
+    messages = request_data.get("messages", [])
+    prompt_parts = []
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content")
+        if role and content:
+            prompt_parts.append(f"{role}: {content}")
+    prompt = "\n".join(prompt_parts)
+
     thinking_enabled = "thinking" in model if "thinking_enabled" not in request_data else request_data["thinking_enabled"]
 
     if request_data.get("stream", False):
