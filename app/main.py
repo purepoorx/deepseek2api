@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException, Depends
+from starlette.exceptions import ClientDisconnect
 from fastapi.responses import StreamingResponse, JSONResponse
 import asyncio
 import httpx
@@ -48,7 +49,13 @@ async def list_models():
 
 @app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key)])
 async def chat_completions(request: Request):
-    request_data = await request.json()
+    try:
+        request_data = await request.json()
+    except Exception:
+        # Handle cases where the client disconnects before sending the body
+        print("Client disconnected before request body was received.")
+        return JSONResponse(status_code=400, content={"error": "Client disconnected."})
+
     prompt = request_data.get("messages", [{}])[-1].get("content")
     model = request_data.get("model", "deepseek-chat")
     stream = request_data.get("stream", False)
@@ -63,10 +70,14 @@ async def chat_completions(request: Request):
         client = DeepSeekClient(token=account.token, session=http_client)
         
         if stream:
-            return StreamingResponse(
-                convert_to_openai_stream(client.chat_stream(prompt, thinking_enabled), model),
-                media_type="text/event-stream"
-            )
+            async def generator():
+                try:
+                    async for chunk in convert_to_openai_stream(client.chat_stream(prompt, thinking_enabled), model):
+                        yield chunk
+                except ClientDisconnect:
+                    print("Client disconnected.")
+
+            return StreamingResponse(generator(), media_type="text/event-stream")
         else:
             full_content = ""
             async for chunk in client.chat_stream(prompt, thinking_enabled):
