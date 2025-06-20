@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import time
 
@@ -9,6 +10,18 @@ from .deepseek import DeepSeekClient
 from .openai_adapter import convert_to_openai_stream
 
 app = FastAPI()
+
+# CORS Middleware Configuration
+origins = ["*"]  # In production, you should restrict this to specific domains.
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 http_client = httpx.AsyncClient(verify=False)
 
 @app.on_event("startup")
